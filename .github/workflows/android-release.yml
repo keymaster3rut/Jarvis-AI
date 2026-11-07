@@ -1,0 +1,456 @@
+name: Android Release (Indonesian)
+
+# Builds JARVIS with Bahasa Indonesia support, arm64 only.
+# Run it from the Actions tab: Android Release (Indonesian) -> Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Add Indonesian support file
+        run: |
+          cat > lib/services/indonesian_support.dart <<'DARTEOF'
+          // Indonesian (Bahasa Indonesia) language support layer for JARVIS.
+          // Added by the android-release.yml patch step. English keeps working:
+          // every function passes English input through untouched.
+
+          class IndonesianSupport {
+            IndonesianSupport._();
+
+            /// True when the latest spoken command looked Indonesian.
+            static bool lastCommandIndonesian = false;
+
+            // Words that (practically) only exist in Indonesian.
+            static const Set<String> _strong = {
+              'saya', 'aku', 'kamu', 'anda', 'tuan', 'tidak', 'nggak', 'enggak', 'sudah',
+              'tolong', 'silakan', 'silahkan', 'terima', 'kasih', 'makasih', 'nyalakan',
+              'matikan', 'hidupkan', 'putar', 'putarkan', 'mainkan', 'buka', 'bukakan',
+              'baterai', 'batre', 'cuaca', 'selesai', 'berhasil', 'mohon', 'maaf',
+              'apakah', 'bagaimana', 'dengan', 'untuk', 'yang', 'tugas', 'aplikasi',
+              'senter', 'berita', 'lagu', 'musik', 'cari', 'carikan', 'kirim', 'kirimkan',
+              'pasang', 'unduh', 'ketik', 'tekan', 'ketuk', 'gulir', 'kembali',
+              'beranda', 'berapa', 'sekarang', 'besok', 'kemarin', 'ingatkan', 'catat',
+              'hubungi', 'telepon', 'telpon', 'jangan', 'batalkan', 'hentikan',
+              'bisukan', 'keraskan', 'kecilkan', 'naikkan', 'turunkan', 'pelankan',
+              'layar', 'tangkapan', 'tonton', 'jadwal', 'pesan', 'ubah', 'atur',
+            };
+
+            // Words that are common in Indonesian but also appear in English text.
+            static const Set<String> _weak = {
+              'dan', 'di', 'ke', 'dari', 'ada', 'ini', 'itu', 'ya', 'iya', 'jam', 'hari',
+              'lagi', 'bisa', 'akan', 'apa', 'mau', 'ingin', 'dong', 'deh', 'nih',
+              'aja', 'saja', 'oke', 'baik', 'pagi', 'malam', 'siang', 'sore', 'video',
+            };
+
+            static bool looksIndonesian(String text) {
+              final tokens = RegExp(r"[a-zA-Z']+")
+                  .allMatches(text.toLowerCase())
+                  .map((m) => m.group(0)!)
+                  .toList();
+              if (tokens.isEmpty) return false;
+              var weak = 0;
+              for (final t in tokens) {
+                if (_strong.contains(t)) return true;
+                if (_weak.contains(t)) weak++;
+              }
+              return weak >= 2;
+            }
+
+            // ---------------------------------------------------------------------------
+            // Voice selection (Edge neural TTS)
+            // ---------------------------------------------------------------------------
+
+            /// Picks an Indonesian neural voice when [text] is Indonesian, otherwise
+            /// keeps the voice the user configured.
+            static String neuralVoiceFor(String text, String configured) {
+              final c = configured.toLowerCase();
+              if (c.startsWith('id-')) return configured;
+              if (!looksIndonesian(text)) return configured;
+              final female = c.contains('emily') ||
+                  c.contains('jenny') ||
+                  c.contains('aria') ||
+                  c.contains('sonia') ||
+                  c.contains('libby') ||
+                  c.contains('natasha');
+              return female ? 'id-ID-GadisNeural' : 'id-ID-ArdiNeural';
+            }
+
+            /// "id-ID-ArdiNeural" -> "id-ID".
+            static String langOfVoice(String voice) {
+              final p = voice.split('-');
+              if (p.length >= 2) return p[0] + '-' + p[1];
+              return 'en-US';
+            }
+
+            // ---------------------------------------------------------------------------
+            // Prompt directives
+            // ---------------------------------------------------------------------------
+
+            static String get languageDirective {
+              final base =
+                  "LANGUAGE: Reply in the same language the user writes in. If the user writes Indonesian, answer in natural spoken Bahasa Indonesia and address the user as 'Tuan' instead of 'sir'. If the user writes English, answer in English. Never output markdown symbols when the reply will be spoken aloud.";
+              if (lastCommandIndonesian) {
+                return base +
+                    " The user is currently speaking Indonesian, so reply in Bahasa Indonesia.";
+              }
+              return base;
+            }
+
+            static String get agentDirective {
+              return "LANGUAGE: The user's GOAL may be written in Indonesian (Bahasa Indonesia) or English. Understand both. Indonesian action words mean: buka=open, cari/carikan=search, putar/mainkan=play, ketik=type, kirim=send, pasang/unduh/instal=install/download, kembali=back, beranda=home, gulir=scroll, pilih=select, tekan/klik/ketuk=tap, nyalakan/aktifkan=turn on, matikan/nonaktifkan=turn off, tonton=watch. The phone's UI may be in Indonesian or English: match click_text against the labels actually shown in the screen dump (for example 'Cari' or 'Search', 'Kirim' or 'Send', 'Pasang' or 'Install'), and try the other language when a label is not found. Rules 2, 3 and 4 below apply equally to Indonesian goals (for example 'pasang instagram' means install, 'putar video' or 'tonton' means YouTube). Keep the JSON keys and action names in English exactly as specified. Text entered with type_text must stay in the language the user asked for. Write the reasoning field in English.";
+            }
+
+            static String get classifierDirective {
+              return "LANGUAGE: The voice command may be Indonesian (Bahasa Indonesia) or English. Classify by meaning, for example 'nyalakan senter' means torch on, 'cuaca di Jakarta' means weather, 'jam berapa' means datetime, 'buka YouTube lalu putar lagu ...' means action, 'ingatkan saya besok jam 8' means calendar, 'catat ...' means notes, 'kirim WhatsApp ke ...' means message, 'berita terbaru' means news, 'cari tahu ...' means web_search. Keep the 'type' value and code-like tool_arg values exactly in English: 'on' or 'off', and the system commands volume_up, volume_down, mute, unmute, brightness_up, brightness_down, screenshot, home, back, sentry_arm, sentry_disarm. For 'action', write the goal in tool_arg in clear Indonesian (the user's own language) and do not translate names of apps, people or songs. Write the 'spoken' field in the same language as the command: Bahasa Indonesia for Indonesian commands, addressing the user as 'Tuan'. For an Indonesian command that asks the phone to do something (open, install, play, search inside an app, change a setting, tap, type, scroll), choose 'action' instead of 'chat'.";
+            }
+
+            // ---------------------------------------------------------------------------
+            // Command normalisation: Indonesian -> canonical English for the fast paths
+            // ---------------------------------------------------------------------------
+
+            static const Map<String, String> _newsTopics = {
+              'teknologi': 'tech',
+              'olahraga': 'sports',
+              'sepak bola': 'football',
+              'sepakbola': 'football',
+              'bola': 'football',
+              'bisnis': 'business',
+              'ekonomi': 'business',
+              'kripto': 'crypto',
+              'dunia': 'world',
+              'internasional': 'world',
+              'sains': 'science',
+              'ilmu pengetahuan': 'science',
+              'politik': 'politics',
+              'luar angkasa': 'space',
+              'antariksa': 'space',
+            };
+
+            /// Maps well-known Indonesian commands onto the English phrases that the
+            /// built-in fast paths already understand. Anything else is returned
+            /// unchanged so the AI (with the Indonesian directives) handles it.
+            static String normalizeCommand(String input) {
+              final original = input.trim();
+              lastCommandIndonesian = looksIndonesian(original);
+              if (!lastCommandIndonesian) return original;
+
+              var s = original
+                  .toLowerCase()
+                  .replaceAll(RegExp(r'[,.!?;:]+'), ' ')
+                  .replaceAll(RegExp(r'\s+'), ' ')
+                  .trim();
+              final stripped = s
+                  .replaceAll(
+                      RegExp(
+                          r'\b(tolong|coba|dong|deh|nih|kak|bisa|bisakah|mohon|jarvis|dong)\b'),
+                      ' ')
+                  .replaceAll(RegExp(r'\s+'), ' ')
+                  .trim();
+              if (stripped.isNotEmpty) s = stripped;
+
+              bool has(String pattern) => RegExp(pattern).hasMatch(s);
+
+              // Cancel / stop the running task.
+              if (has(r'^(berhenti|stop|batal|batalkan|hentikan|hentikan tugas|batalkan tugas|batalkan semua)$')) {
+                return 'cancel';
+              }
+
+              // Politeness / stand down.
+              if (has(r'^(tidak terima kasih|tidak usah|nggak usah|gak usah)$')) {
+                return 'no thanks';
+              }
+              if (has(r'^(terima kasih|terimakasih|makasih|thanks)( banyak)?$')) {
+                return 'thank you';
+              }
+              if (has(r'^(sudah cukup|cukup|itu saja|sudah itu saja|tidak ada lagi|sudah selesai)$')) {
+                return "that's all";
+              }
+              if (has(r'^(selamat malam|tidur|istirahat|siaga)$')) {
+                return 'go to sleep';
+              }
+
+              // Always-on / hands-free.
+              if (has(r'^(matikan|nonaktifkan) (mode )?(selalu aktif|selalu mendengar|bebas genggam)$')) {
+                return 'turn off always on';
+              }
+              if (has(r'^((aktifkan|nyalakan) )?(mode )?(selalu aktif|selalu mendengar|bebas genggam|dengarkan terus)$')) {
+                return 'always on';
+              }
+
+              // Battery (short status questions only, not "buka pengaturan baterai").
+              if (has(r'(baterai|batre)') &&
+                  !has(r'^(buka|ubah|atur|matikan|nyalakan|aktifkan|setel|pengaturan|hemat)') &&
+                  s.split(' ').length <= 7) {
+                return 'battery level';
+              }
+
+              // Flashlight.
+              if (has(r'(senter|lampu flash|lampu kilat|flashlight)')) {
+                if (has(r'(matikan|mati|nonaktifkan|tutup|padamkan)')) {
+                  return 'turn off flashlight';
+                }
+                if (has(r'(nyalakan|hidupkan|aktifkan|nyala|buka)')) {
+                  return 'turn on flashlight';
+                }
+              }
+
+              // Time / date.
+              if (has(r'(jam berapa|pukul berapa|waktu sekarang)')) {
+                return 'what time is it';
+              }
+              if (has(r'(hari apa)')) {
+                return 'what day is it';
+              }
+              if (has(r'(tanggal berapa|tanggal hari ini|tanggal sekarang)')) {
+                return 'what is the date';
+              }
+
+              // System controls.
+              if (has(r'(naikkan|keraskan|besarkan|tambah|tambahkan) (volume|suara)') ||
+                  has(r'^volume naik$')) {
+                return 'volume up';
+              }
+              if (has(r'(turunkan|kecilkan|kurangi|pelankan) (volume|suara)') ||
+                  has(r'^(volume turun|pelankan)$')) {
+                return 'volume down';
+              }
+              if (has(r'^(bisukan|bisukan suara|senyap|diam|matikan suara)$')) {
+                return 'mute';
+              }
+              if (has(r'^(aktifkan suara|nyalakan suara|buka bisu|bunyikan|bunyikan suara)$')) {
+                return 'unmute';
+              }
+              if (has(r'(screenshot|tangkapan layar|tangkap layar|foto layar|potret layar)')) {
+                return 'screenshot';
+              }
+              if (has(r'^(beranda|ke beranda|layar utama|ke layar utama|pulang|kembali ke beranda|buka beranda|kembali ke layar utama)$')) {
+                return 'go home';
+              }
+              if (has(r'^(kembali|mundur|tombol kembali|tekan kembali|ke belakang)$')) {
+                return 'go back';
+              }
+
+              // News.
+              if (has(r'berita')) {
+                var topic = '';
+                for (final entry in _newsTopics.entries) {
+                  if (s.contains(entry.key)) {
+                    topic = ' ' + entry.value;
+                    break;
+                  }
+                }
+                return 'latest news' + topic;
+              }
+
+              // Phone call: "telepon budi" -> "call budi".
+              final callMatch =
+                  RegExp(r'^(telepon|telpon|hubungi|panggil|telepon ke|telpon ke|menelepon)\s+(.+)$')
+                      .firstMatch(s);
+              if (callMatch != null) {
+                return 'call ' + callMatch.group(2)!.trim();
+              }
+
+              // Playlist goals need the full agent (open playlist, pick a video).
+              if (has(r'playlist|daftar putar')) return original;
+
+              // Play music / video: "putar lagu x di youtube" -> "play x on youtube".
+              final playMatch = RegExp(
+                      r'^(putar|putarkan|mainkan|setel|setelkan)(?:\s+(?:lagu|musik|video|lagunya))?(?:\s+(.+))?$')
+                  .firstMatch(s);
+              if (playMatch != null) {
+                var rest = (playMatch.group(2) ?? '').trim();
+                final isGeneric = RegExp(r'^(lagu|musik)$').hasMatch(s.replaceFirst(RegExp(r'^(putar|putarkan|mainkan|setel|setelkan)\s+'), ''));
+                rest = rest
+                    .replaceAll(RegExp(r'\bdi youtube\b'), 'on youtube')
+                    .replaceAll(RegExp(r'\bdi yt\b'), 'on youtube')
+                    .trim();
+                if (rest.isEmpty || isGeneric) {
+                  return s.contains('musik') ? 'play music' : 'play a song';
+                }
+                return 'play ' + rest;
+              }
+
+              return original;
+            }
+          }
+          DARTEOF
+
+      - name: Apply Indonesian patches
+        run: |
+          python3 - <<'PYEOF'
+          #!/usr/bin/env python3
+          """Adds Indonesian (Bahasa Indonesia) command support to J.A.R.V.I.S.
+          Run from the repository root during the CI build. Fails loudly if any anchor
+          is missing so a broken patch never silently produces a half-patched APK."""
+          import re
+          import sys
+          import pathlib
+
+          ROOT = pathlib.Path('.')
+          IMPORT = "import 'indonesian_support.dart';"
+
+
+          def rd(p):
+              return (ROOT / p).read_text(encoding='utf-8')
+
+
+          def wr(p, t):
+              (ROOT / p).write_text(t, encoding='utf-8')
+
+
+          def sub(p, old, new, expect=1):
+              t = rd(p)
+              n = t.count(old)
+              if n != expect:
+                  sys.exit(f'PATCH FAILED in {p}: expected {expect} match(es), found {n} for: {old[:80]!r}')
+              wr(p, t.replace(old, new))
+              print(f'  ok  {p}: {old[:60]!r}')
+
+
+          def add_import(p):
+              t = rd(p)
+              if IMPORT not in t:
+                  wr(p, IMPORT + '\n' + t)
+                  print(f'  ok  {p}: import')
+
+
+          # 1. App identity: coexist with the original private-agent app --------------
+          gradle = 'android/app/build.gradle.kts'
+          sub(gradle, 'applicationId = "com.privateagent.private_agent"',
+              'applicationId = "com.privateagent.jarvis_id"')
+          sub('android/app/src/main/AndroidManifest.xml', 'android:label="JARVIS"',
+              'android:label="JARVIS ID"')
+          sub('android/app/src/main/res/values/strings.xml',
+              '<string name="accessibility_service_label">PrivateAgent Screen Control</string>',
+              '<string name="accessibility_service_label">JARVIS ID Screen Control</string>')
+
+          # 2. Speech recognition: Indonesian first, English as additional language -----
+          sub('android/app/src/main/kotlin/com/privateagent/private_agent/MainActivity.kt',
+              'putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)',
+              'putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)\n'
+              '            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")\n'
+              '            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "id-ID")\n'
+              '            putStringArrayListExtra("android.speech.extra.ADDITIONAL_LANGUAGES", arrayListOf("en-US"))')
+
+          # 3. Text to speech: Indonesian voice for Indonesian text ----------------------
+          edge = 'lib/services/edge_tts_service.dart'
+          add_import(edge)
+          sub(edge, 'final selectedVoice = voice ?? SettingsService.instance.jarvisNeuralVoice;',
+              'final selectedVoice = voice ??\n        IndonesianSupport.neuralVoiceFor(\n            text, SettingsService.instance.jarvisNeuralVoice);')
+          sub(edge, "xml:lang='en-US'",
+              "xml:lang='${IndonesianSupport.langOfVoice(selectedVoice)}'")
+
+          voice = 'lib/services/voice_service.dart'
+          add_import(voice)
+          sub(voice, 'await _tts.speak(clean);',
+              "if (IndonesianSupport.looksIndonesian(clean)) {\n"
+              "          try {\n"
+              "            await _tts.setLanguage('id-ID');\n"
+              "          } catch (_) {}\n"
+              "        }\n"
+              "        await _tts.speak(clean);")
+
+          # 4. AI prompts -----------------------------------------------------------------
+          ai = 'lib/services/ai_service.dart'
+          add_import(ai)
+          sub(ai, 'You are PrivateAgent, an autonomous Android UI automation agent.',
+              'You are PrivateAgent, an autonomous Android UI automation agent.\n'
+              '${IndonesianSupport.agentDirective}')
+          sub(ai, "Analyze the user's voice command:",
+              '${IndonesianSupport.classifierDirective}\n\nAnalyze the user\'s voice command:')
+          sub(ai, "You are Jarvis, an elite, highly intelligent and articulate personal AI companion living on the user's Android phone, created and built by Abuzar.",
+              "You are Jarvis, an elite, highly intelligent and articulate personal AI companion living on the user's Android phone, created and built by Abuzar.\n"
+              '${IndonesianSupport.languageDirective}')
+
+          t = rd(ai)
+          pat = re.compile(r'(You are Jarvis, an elite, highly intelligent (?:personal AI companion|AI assistant) created and built by Abuzar[^\n]*\n)')
+          t, n = pat.subn(lambda m: m.group(1) + '${IndonesianSupport.languageDirective}\n', t)
+          if n < 1:
+              sys.exit('PATCH FAILED in ai_service.dart: no secondary Jarvis prompts found')
+          t = t.replace('Provide clean spoken English',
+                        "Provide clean spoken text in the user's language (Indonesian or English)")
+          t = t.replace('Write clean, natural English for voice synthesis',
+                        "Write clean, natural text in the user's language (Indonesian or English) for voice synthesis")
+          wr(ai, t)
+          print(f'  ok  {ai}: {n} secondary prompt(s)')
+
+          # 5. Command routing ---------------------------------------------------------------
+          js = 'lib/services/jarvis_service.dart'
+          add_import(js)
+          sub(js, 'final trimmed = command.trim();',
+              'final trimmed = IndonesianSupport.normalizeCommand(command.trim());')
+          sub(js, r'hey|hello|hi|okay|ok|yo|listen|wake\s+up|dear)\s+(?:jarvis',
+              r'hey|hello|hi|hai|halo|hei|oke|okay|ok|yo|listen|wake\s+up|dear)\s+(?:jarvis')
+          sub(js, 'jarvice|charvis|garvis',
+              'jarvice|charvis|garvis|jarfis|jarpis|carvis|jarvish|jarvik', expect=3)
+          sub(js, "lowerBefore == 'hi' ||",
+              "lowerBefore == 'hi' ||\n          lowerBefore == 'hai' ||\n          lowerBefore == 'halo' ||\n          lowerBefore == 'hei' ||\n          lowerBefore == 'oke' ||")
+          sub(js, '(yes|yeah|yep|',
+              '(yes|ya|iya|yap|boleh|silakan|lanjut|lanjutkan|baiklah|setuju|tentu|ayo|oke|yeah|yep|')
+          sub(js, '(no|nope|nah|',
+              '(no|tidak|nggak|enggak|gak|jangan|batal|nanti|lewati|nope|nah|')
+
+          # 6. Risk check understands Indonesian ------------------------------------------------
+          sub('lib/services/security_alert_service.dart', "lower.contains('call ')) {",
+              "lower.contains('call ') ||\n"
+              "        lower.contains('kirim uang') ||\n"
+              "        lower.contains('kirimkan uang') ||\n"
+              "        lower.contains('transfer') ||\n"
+              "        lower.contains('beli ') ||\n"
+              "        lower.contains('bayar') ||\n"
+              "        lower.contains('hapus') ||\n"
+              "        lower.contains('copot') ||\n"
+              "        lower.contains('reset pabrik') ||\n"
+              "        lower.contains('kirim pesan') ||\n"
+              "        lower.contains('kirim sms') ||\n"
+              "        lower.contains('telepon ') ||\n"
+              "        lower.contains('telpon ') ||\n"
+              "        lower.contains('hubungi ')) {")
+
+          print('All Indonesian patches applied.')
+          PYEOF
+
+      - name: Flutter version and dependencies
+        run: |
+          flutter --version
+          flutter pub get
+
+      - name: Build release APK (arm64)
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk JARVIS-ID-arm64.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JARVIS-ID-arm64
+          path: JARVIS-ID-arm64.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: jarvis-id-${{ github.run_number }}
+          name: JARVIS ID (Bahasa Indonesia) build ${{ github.run_number }}
+          files: JARVIS-ID-arm64.apk
