@@ -28,7 +28,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Apply minimal Indonesian patch
+      - name: Apply Indonesian patch + mic diagnostics
         run: |
           python3 - <<'PYEOF'
           #!/usr/bin/env python3
@@ -93,6 +93,30 @@ jobs:
               'You are PrivateAgent, an autonomous Android UI automation agent.\n' + AGENT)
           sub(ai, "Analyze the user's voice command:", CLASSIFIER + "\n\nAnalyze the user's voice command:")
           print('Minimal Indonesian patch applied.')
+
+          # Diagnostics only (no behaviour change): show mic error codes / heard text on screen
+          mact = 'android/app/src/main/kotlin/com/privateagent/private_agent/MainActivity.kt'
+          sub(mact, 'private var isRestartPending = false',
+              'private var isRestartPending = false\n'
+              '    private var lastDiagError = Int.MIN_VALUE')
+          sub(mact,
+              'android.util.Log.i("JARVIS_VOICE", "onError: code=$error, isContinuous=$isContinuousListening")',
+              'android.util.Log.i("JARVIS_VOICE", "onError: code=$error, isContinuous=$isContinuousListening")\n'
+              '            if (error != lastDiagError) {\n'
+              '                lastDiagError = error\n'
+              '                mainHandler.post {\n'
+              '                    android.widget.Toast.makeText(this@MainActivity, "JARVIS mic error code: " + error + " | recognizer available: " + SpeechRecognizer.isRecognitionAvailable(this@MainActivity) + " | continuous: " + isContinuousListening, android.widget.Toast.LENGTH_LONG).show()\n'
+              '                }\n'
+              '            }')
+          sub(mact,
+              'android.util.Log.i("JARVIS_VOICE", "onResults: best=\'$best\', matches=$matches")',
+              'android.util.Log.i("JARVIS_VOICE", "onResults: best=\'$best\', matches=$matches")\n'
+              '            if (best.isNotEmpty()) {\n'
+              '                mainHandler.post {\n'
+              '                    android.widget.Toast.makeText(this@MainActivity, "JARVIS heard: " + best, android.widget.Toast.LENGTH_LONG).show()\n'
+              '                }\n'
+              '            }')
+          print('Diagnostic toasts added.')
           PYEOF
 
       - name: Flutter version and dependencies
@@ -104,17 +128,17 @@ jobs:
         run: flutter build apk --release --target-platform android-arm64
 
       - name: Rename APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk JARVIS-ID-arm64.apk
+        run: cp build/app/outputs/flutter-apk/app-release.apk JARVIS-ID-diag-arm64.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JARVIS-ID-arm64
-          path: JARVIS-ID-arm64.apk
+          name: JARVIS-ID-diag-arm64
+          path: JARVIS-ID-diag-arm64.apk
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: jarvis-id-${{ github.run_number }}
-          name: JARVIS ID (Indonesian) build ${{ github.run_number }}
-          files: JARVIS-ID-arm64.apk
+          tag_name: jarvis-id-diag-${{ github.run_number }}
+          name: JARVIS ID diagnostic build ${{ github.run_number }}
+          files: JARVIS-ID-diag-arm64.apk
