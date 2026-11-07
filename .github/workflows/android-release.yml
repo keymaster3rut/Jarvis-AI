@@ -28,6 +28,70 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Add Indonesian command mapper
+        run: |
+          cat > lib/services/indonesian_commands.dart <<'DARTEOF'
+          // Maps simple Indonesian commands onto the English phrases the built-in fast
+          // paths already understand ("open <app>", "play <song>"). Anything else is
+          // returned unchanged and handled by the AI exactly as before.
+          String indonesianToEnglishCommand(String input) {
+            final text = input.trim();
+            if (text.isEmpty) return text;
+
+            var s = text.replaceAll(RegExp(r'[,.!?;:]+\s*$'), '').trim();
+            s = s
+                .replaceFirst(
+                    RegExp(r'^(tolong|coba|bisa|mohon)\s+', caseSensitive: false), '')
+                .replaceFirst(
+                    RegExp(r'\s+(dong|donk|ya|deh|aja|saja|sekarang|please)$',
+                        caseSensitive: false),
+                    '')
+                .trim();
+            final lower = s.toLowerCase();
+
+            // Multi-step goals stay with the AI agent.
+            final compound = RegExp(
+                    r'\b(lalu|kemudian|terus|setelah itu|habis itu|dan|serta)\b')
+                .hasMatch(lower);
+            if (compound) return text;
+
+            final openMatch = RegExp(
+                    r'^(buka|bukakan|jalankan|luncurkan|masuk ke|pergi ke)\s+(?:aplikasi\s+|app\s+)?(.+)$',
+                    caseSensitive: false)
+                .firstMatch(s);
+            if (openMatch != null) {
+              final target = openMatch.group(2)!.trim();
+              final targetLower = target.toLowerCase();
+              if (target.isNotEmpty && targetLower != 'aplikasi' && targetLower != 'app') {
+                return 'open ' + target;
+              }
+              return text;
+            }
+
+            if (lower.contains('playlist') || lower.contains('daftar putar')) return text;
+
+            if (RegExp(r'^(putar|putarkan|mainkan)\s+(lagu|musik)$').hasMatch(lower)) {
+              return 'play music';
+            }
+
+            final playMatch = RegExp(
+                    r'^(putar|putarkan|mainkan|setel|setelkan)\s+(?:lagu\s+|musik\s+|video\s+)?(.+)$',
+                    caseSensitive: false)
+                .firstMatch(s);
+            if (playMatch != null) {
+              final rest = playMatch
+                  .group(2)!
+                  .trim()
+                  .replaceAll(
+                      RegExp(r'\s+di\s+(youtube|yt)$', caseSensitive: false), ' on youtube')
+                  .trim();
+              if (rest.isNotEmpty) return 'play ' + rest;
+            }
+
+            return text;
+          }
+          DARTEOF
+
       - name: Apply Indonesian patch + mic diagnostics
         run: |
           python3 - <<'PYEOF'
@@ -117,6 +181,29 @@ jobs:
               '                }\n'
               '            }')
           print('Diagnostic toasts added.')
+
+
+          # Fast paths: Indonesian "buka aplikasi X" / "putar lagu X" -> existing English fast paths
+          js = 'lib/services/jarvis_service.dart'
+          t = (ROOT / js).read_text(encoding='utf-8')
+          imp = "import 'indonesian_commands.dart';"
+          if imp not in t:
+              (ROOT / js).write_text(imp + '\n' + t, encoding='utf-8')
+          sub(js, 'final trimmed = command.trim();',
+              'final trimmed = indonesianToEnglishCommand(command.trim());')
+          sub('lib/services/app_launcher_service.dart',
+              "    'sms': 'com.google.android.apps.messaging',\n  };",
+              "    'sms': 'com.google.android.apps.messaging',\n"
+              "    'pengaturan': 'com.android.settings',\n"
+              "    'setelan': 'com.android.settings',\n"
+              "    'peta': 'com.google.android.apps.maps',\n"
+              "    'kontak': 'com.google.android.contacts',\n"
+              "    'galeri': 'com.google.android.apps.photos',\n"
+              "    'pesan': 'com.google.android.apps.messaging',\n"
+              "    'peramban': 'com.android.chrome',\n"
+              "    'toko play': 'com.android.vending',\n"
+              "  };")
+          print('Indonesian fast-path mapping added.')
           PYEOF
 
       - name: Flutter version and dependencies
