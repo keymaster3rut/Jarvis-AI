@@ -345,13 +345,38 @@ jobs:
               '<string name="accessibility_service_label">PrivateAgent Screen Control</string>',
               '<string name="accessibility_service_label">JARVIS ID Screen Control</string>')
 
-          # 2. Speech recognition: Indonesian first, English as additional language -----
-          sub('android/app/src/main/kotlin/com/privateagent/private_agent/MainActivity.kt',
+          # 2. Speech recognition: Indonesian first, with a safe fallback ----------------
+          # The native listener restarts forever on any recognizer error, so a language
+          # the recognizer rejects (error 12/13) would make the mic flap on/off. We ask
+          # for id-ID, and if the recognizer refuses it we fall back to the phone's own
+          # language. Repeated errors also back off instead of retrying every 250 ms.
+          mact = 'android/app/src/main/kotlin/com/privateagent/private_agent/MainActivity.kt'
+          sub(mact, 'private var isRestartPending = false',
+              'private var isRestartPending = false\n'
+              '    private var languageExtrasEnabled = true\n'
+              '    private var consecutiveErrors = 0')
+          sub(mact,
               'putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)',
               'putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)\n'
-              '            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")\n'
-              '            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "id-ID")\n'
-              '            putStringArrayListExtra("android.speech.extra.ADDITIONAL_LANGUAGES", arrayListOf("en-US"))')
+              '            if (languageExtrasEnabled) {\n'
+              '                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "id-ID")\n'
+              '                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "id-ID")\n'
+              '            }')
+          sub(mact,
+              'android.util.Log.i("JARVIS_VOICE", "onError: code=$error, isContinuous=$isContinuousListening")',
+              'android.util.Log.i("JARVIS_VOICE", "onError: code=$error, isContinuous=$isContinuousListening")\n'
+              '            if ((error == 12 || error == 13) && languageExtrasEnabled) {\n'
+              '                languageExtrasEnabled = false\n'
+              '                recognitionIntent = null\n'
+              '            }')
+          sub(mact, 'else -> 250L',
+              'else -> (250L * (++consecutiveErrors)).coerceAtMost(3000L)')
+          sub(mact, 'override fun onBeginningOfSpeech() {}',
+              'override fun onBeginningOfSpeech() { consecutiveErrors = 0 }')
+          sub(mact,
+              'android.util.Log.i("JARVIS_VOICE", "onResults: best=\'$best\', matches=$matches")',
+              'android.util.Log.i("JARVIS_VOICE", "onResults: best=\'$best\', matches=$matches")\n'
+              '            consecutiveErrors = 0')
 
           # 3. Text to speech: Indonesian voice for Indonesian text ----------------------
           edge = 'lib/services/edge_tts_service.dart'
